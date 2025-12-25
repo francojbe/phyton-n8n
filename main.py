@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import os
-import sys
 from datetime import datetime
 from typing import Optional
 
@@ -10,19 +9,13 @@ from pydantic import BaseModel, HttpUrl
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from dotenv import load_dotenv
 
-# Intentar importar stealth con fallback seguro
-try:
-    from playwright_stealth import stealth_async as stealth_func
-except ImportError:
-    try:
-        from playwright_stealth import stealth as stealth_func
-    except ImportError:
-        stealth_func = None
+# Importar el módulo completo para evitar confusiones de nombres
+import playwright_stealth
 
 # Cargar variables de entorno
 load_dotenv()
 
-app = FastAPI(title="Scraping Microservice PRO v2")
+app = FastAPI(title="Scraping Microservice PRO v3")
 
 # Configuración de Seguridad
 API_KEY_CREDENTIAL = os.getenv("SCRAPING_API_KEY", "scraping_secret_key_2025")
@@ -41,11 +34,31 @@ class ScrapeRequest(BaseModel):
     target_url: HttpUrl
     wait_time: Optional[int] = 2
 
+async def apply_stealth_safely(page):
+    """
+    Aplica el modo stealth detectando la función correcta en el módulo.
+    """
+    try:
+        # Buscar la función asíncrona o síncrona dentro del módulo
+        stealth_func = getattr(playwright_stealth, "stealth_async", None) or getattr(playwright_stealth, "stealth", None)
+        
+        if stealth_func and callable(stealth_func):
+            print(f"Aplicando stealth usando: {stealth_func.__name__}")
+            if asyncio.iscoroutinefunction(stealth_func):
+                await stealth_func(page)
+            else:
+                stealth_func(page)
+            return True
+    except Exception as e:
+        print(f"Aviso: Falló la aplicación de stealth (no crítico): {e}")
+    return False
+
 @app.post("/scrape", dependencies=[Depends(verify_api_key)])
 async def scrape_data(request: ScrapeRequest):
     print(f"[{datetime.now()}] Nuevo scrape solicitado para: {request.target_url}")
     
     async with async_playwright() as p:
+        browser = None
         try:
             print("Lanzando navegador...")
             browser = await p.chromium.launch(
@@ -59,23 +72,15 @@ async def scrape_data(request: ScrapeRequest):
             
             page = await context.new_page()
             
-            # Aplicar stealth si está disponible
-            if stealth_func:
-                print("Aplicando modo stealth...")
-                try:
-                    if asyncio.iscoroutinefunction(stealth_func):
-                        await stealth_func(page)
-                    else:
-                        stealth_func(page)
-                except Exception as stealth_e:
-                    print(f"Aviso: Falló la aplicación de stealth: {stealth_e}")
+            # Aplicar stealth de forma segura
+            await apply_stealth_safely(page)
 
             print(f"Navegando a {request.target_url}...")
             await page.goto(str(request.target_url), wait_until="networkidle", timeout=30000)
             
-            # Ejemplo específico de login
+            # Ejemplo específico de login para pruebas
             if "the-internet.herokuapp.com/login" in str(request.target_url):
-                print("Ejecutando lógica de login prueba...")
+                print("Ejecutando lógica de login de prueba...")
                 await page.fill("#username", request.username)
                 await page.fill("#password", request.password)
                 await page.click("button[type='submit']")
@@ -94,7 +99,7 @@ async def scrape_data(request: ScrapeRequest):
                     "url": page.url
                 }
 
-            # Caso general
+            # Caso general (extraer título)
             title = await page.title()
             return {
                 "status": "completed",
@@ -105,26 +110,34 @@ async def scrape_data(request: ScrapeRequest):
 
         except PlaywrightTimeoutError:
             print("Error: Timeout de Playwright")
-            screenshot = await page.screenshot(full_page=True)
+            screenshot_b64 = None
+            if browser:
+                try:
+                    screenshot = await page.screenshot(full_page=True)
+                    screenshot_b64 = base64.b64encode(screenshot).decode()
+                except: pass
+            
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail={"error": "Timeout", "screenshot": base64.b64encode(screenshot).decode()}
+                detail={"error": "Timeout", "screenshot": screenshot_b64}
             )
         except Exception as e:
             print(f"Error crítico durante el scrape: {str(e)}")
-            try:
-                screenshot = await page.screenshot(full_page=True)
-                error_detail = {"error": str(e), "screenshot": base64.b64encode(screenshot).decode()}
-            except:
-                error_detail = {"error": str(e)}
+            screenshot_b64 = None
+            if browser:
+                try:
+                    screenshot = await page.screenshot(full_page=True)
+                    screenshot_b64 = base64.b64encode(screenshot).decode()
+                except: pass
             
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=error_detail
+                detail={"error": str(e), "screenshot": screenshot_b64}
             )
         finally:
-            await browser.close()
-            print("Navegador cerrado.")
+            if browser:
+                await browser.close()
+            print("Sesión terminada.")
 
 if __name__ == "__main__":
     import uvicorn

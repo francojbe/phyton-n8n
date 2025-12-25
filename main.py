@@ -7,7 +7,13 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, status, Header, Depends
 from pydantic import BaseModel, HttpUrl
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
-from playwright_stealth import stealth_async
+try:
+    from playwright_stealth import stealth_async as stealth_func
+except ImportError:
+    import playwright_stealth
+    # Fallback to check if it's in the module
+    stealth_func = getattr(playwright_stealth, "stealth_async", None) or getattr(playwright_stealth, "stealth", None)
+
 from dotenv import load_dotenv
 
 # Cargar variables de entorno (para la API Key)
@@ -61,7 +67,13 @@ async def scrape_data(request: ScrapeRequest):
         page = await context.new_page()
         
         # Aplicar modo Stealth para evadir detecciones avanzadas
-        await stealth_async(page)
+        # Aplicar modo Stealth si la función está disponible
+        if stealth_func:
+            if asyncio.iscoroutinefunction(stealth_func):
+                await stealth_func(page)
+            else:
+                stealth_func(page)
+
         
         try:
             # Ir a la URL solicitada

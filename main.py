@@ -1,51 +1,73 @@
 import asyncio
-from fastapi import FastAPI, HTTPException, status
+import base64
+import os
+from datetime import datetime
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException, status, Header, Depends
 from pydantic import BaseModel, HttpUrl
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright_stealth import stealth_async
+from dotenv import load_dotenv
 
-app = FastAPI(title="Scraping Microservice API-First")
+# Cargar variables de entorno (para la API Key)
+load_dotenv()
+
+app = FastAPI(title="Scraping Microservice PRO")
+
+# Configuración de Seguridad
+API_KEY_CREDENTIAL = os.getenv("SCRAPING_API_KEY", "scraping_secret_key_2025")
+
+async def verify_api_key(x_api_key: str = Header(...)):
+    if x_api_key != API_KEY_CREDENTIAL:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API Key"
+        )
+    return x_api_key
 
 class ScrapeRequest(BaseModel):
     username: str
     password: str
     target_url: HttpUrl
+    wait_time: Optional[int] = 5  # Tiempo de espera adicional tras login
 
-@app.post("/scrape")
+@app.post("/scrape", dependencies=[Depends(verify_api_key)])
 async def scrape_data(request: ScrapeRequest):
     """
-    Endpoint de scraping que realiza login en la URL objetivo.
-    Ejemplo configurado para https://the-internet.herokuapp.com/login
+    Endpoint PRO con:
+    - Seguridad por API Key.
+    - Modo Stealth (anti-bot).
+    - Captura de pantalla automática en caso de error.
     """
     
     async with async_playwright() as p:
-        # Lanzamiento del navegador con flags anti-detección básica
         browser = await p.chromium.launch(
             headless=True,
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-accelerated-2d-canvas",
-                "--no-first-run",
-                "--no-zygote",
-                "--single-process",
-                "--disable-gpu"
+                "--disable-blink-features=AutomationControlled"
             ]
         )
         
-        # Crear contexto con User-Agent moderno para evitar bloqueos simples
+        # User-Agent persistente y de calidad
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 720}
         )
         
         page = await context.new_page()
+        
+        # Aplicar modo Stealth para evadir detecciones avanzadas
+        await stealth_async(page)
         
         try:
             # Ir a la URL solicitada
             await page.goto(str(request.target_url), wait_until="networkidle", timeout=30000)
             
             # Lógica de Login específica para el ejemplo dummy
-            # Nota: En un entorno real, esto podría variar según 'target_url'
             if "the-internet.herokuapp.com/login" in str(request.target_url):
                 try:
                     await page.fill("#username", request.username)
@@ -58,34 +80,64 @@ async def scrape_data(request: ScrapeRequest):
                     
                     success_message = await page.inner_text(success_selector)
                     
+                    # Pequeña pausa opcional para asegurar carga de datos tras login
+                    if request.wait_time:
+                        await asyncio.sleep(request.wait_time)
+                    
                     return {
                         "status": "success",
+                        "timestamp": datetime.now().isoformat(),
                         "message": success_message.strip(),
                         "url": page.url
                     }
                 except PlaywrightTimeoutError:
+                    # Captura de pantalla si el login falla (para debugging)
+                    screenshot_bytes = await page.screenshot(full_page=True)
+                    screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+                    
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Login failed: Invalid credentials or success message not found."
+                        detail={
+                            "error": "Login failed or element not found",
+                            "screenshot": screenshot_b64
+                        }
                     )
             
-            # Si no es la URL de prueba, devolvemos el título de la página como fallback
+            # Comportamiento general para otras URLs (extraer título y meta descripción)
             content = await page.title()
             return {
                 "status": "completed",
+                "timestamp": datetime.now().isoformat(),
                 "page_title": content,
                 "url": page.url
             }
 
         except PlaywrightTimeoutError:
+            # Captura de pantalla en timeout
+            screenshot_bytes = await page.screenshot(full_page=True)
+            screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+            
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail="Request timed out while loading the page."
+                detail={
+                    "error": "Request timed out",
+                    "screenshot": screenshot_b64
+                }
             )
         except Exception as e:
+            # Error genérico con captura si es posible
+            try:
+                screenshot_bytes = await page.screenshot(full_page=True)
+                screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+            except:
+                screenshot_b64 = None
+
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"An unexpected error occurred: {str(e)}"
+                detail={
+                    "error": str(e),
+                    "screenshot": screenshot_b64
+                }
             )
         finally:
             await browser.close()

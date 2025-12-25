@@ -2,7 +2,7 @@ import asyncio
 import base64
 import os
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict
 
 from fastapi import FastAPI, HTTPException, status, Header, Depends
 from pydantic import BaseModel, HttpUrl
@@ -15,7 +15,7 @@ import playwright_stealth
 # Cargar variables de entorno
 load_dotenv()
 
-app = FastAPI(title="Scraping Microservice PRO v3")
+app = FastAPI(title="Scraping Microservice PRO v4 - Data Extraction")
 
 # Configuración de Seguridad
 API_KEY_CREDENTIAL = os.getenv("SCRAPING_API_KEY", "scraping_secret_key_2025")
@@ -35,110 +35,85 @@ class ScrapeRequest(BaseModel):
     wait_time: Optional[int] = 2
 
 async def apply_stealth_safely(page):
-    """
-    Aplica el modo stealth detectando la función correcta en el módulo.
-    """
     try:
-        # Buscar la función asíncrona o síncrona dentro del módulo
         stealth_func = getattr(playwright_stealth, "stealth_async", None) or getattr(playwright_stealth, "stealth", None)
-        
         if stealth_func and callable(stealth_func):
-            print(f"Aplicando stealth usando: {stealth_func.__name__}")
             if asyncio.iscoroutinefunction(stealth_func):
                 await stealth_func(page)
             else:
                 stealth_func(page)
             return True
     except Exception as e:
-        print(f"Aviso: Falló la aplicación de stealth (no crítico): {e}")
+        print(f"Aviso: Falló stealth: {e}")
     return False
 
 @app.post("/scrape", dependencies=[Depends(verify_api_key)])
 async def scrape_data(request: ScrapeRequest):
-    print(f"[{datetime.now()}] Nuevo scrape solicitado para: {request.target_url}")
+    print(f"[{datetime.now()}] Iniciando Scrape v4: {request.target_url}")
     
     async with async_playwright() as p:
         browser = None
         try:
-            print("Lanzando navegador...")
             browser = await p.chromium.launch(
                 headless=True,
                 args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
             )
-            
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             )
-            
             page = await context.new_page()
-            
-            # Aplicar stealth de forma segura
             await apply_stealth_safely(page)
 
             print(f"Navegando a {request.target_url}...")
             await page.goto(str(request.target_url), wait_until="networkidle", timeout=30000)
             
-            # Ejemplo específico de login para pruebas
+            scraped_data = []
+
+            # Lógica específica para el CRM de Prueba (The Internet)
             if "the-internet.herokuapp.com/login" in str(request.target_url):
-                print("Ejecutando lógica de login de prueba...")
+                print("Procesando Login...")
                 await page.fill("#username", request.username)
                 await page.fill("#password", request.password)
                 await page.click("button[type='submit']")
                 
-                success_selector = ".flash.success"
-                await page.wait_for_selector(success_selector, timeout=10000)
-                success_message = await page.inner_text(success_selector)
+                # Verificar éxito
+                await page.wait_for_selector(".flash.success", timeout=10000)
                 
-                if request.wait_time:
-                    await asyncio.sleep(request.wait_time)
+                # Simular navegación a la "Sección de Clientes" (Challenging DOM tiene una tabla)
+                print("Navegando a la tabla de datos (CRM SIM)...")
+                await page.goto("https://the-internet.herokuapp.com/challenging_dom", wait_until="networkidle")
+                
+                # Extraer filas de la tabla
+                rows = await page.query_selector_all("table tbody tr")
+                for row in rows:
+                    cols = await row.query_selector_all("td")
+                    if len(cols) >= 6:
+                        scraped_data.append({
+                            "name": await cols[0].inner_text(),
+                            "id": await cols[1].inner_text(),
+                            "status": await cols[2].inner_text(),
+                            "action": await cols[3].inner_text(),
+                            "phone": "569" + "".join(filter(str.isdigit, await cols[1].inner_text()))[:8] # Generar cel realista
+                        })
                 
                 return {
                     "status": "success",
-                    "timestamp": datetime.now().isoformat(),
-                    "message": success_message.strip(),
-                    "url": page.url
+                    "message": "Data extracted successfully from CRM Simulation",
+                    "url": page.url,
+                    "data": scraped_data
                 }
 
-            # Caso general (extraer título)
-            title = await page.title()
+            # Caso fallback
             return {
                 "status": "completed",
-                "timestamp": datetime.now().isoformat(),
-                "page_title": title,
-                "url": page.url
+                "page_title": await page.title(),
+                "url": page.url,
+                "data": []
             }
 
-        except PlaywrightTimeoutError:
-            print("Error: Timeout de Playwright")
-            screenshot_b64 = None
-            if browser:
-                try:
-                    screenshot = await page.screenshot(full_page=True)
-                    screenshot_b64 = base64.b64encode(screenshot).decode()
-                except: pass
-            
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail={"error": "Timeout", "screenshot": screenshot_b64}
-            )
         except Exception as e:
-            print(f"Error crítico durante el scrape: {str(e)}")
-            screenshot_b64 = None
-            if browser:
-                try:
-                    screenshot = await page.screenshot(full_page=True)
-                    screenshot_b64 = base64.b64encode(screenshot).decode()
-                except: pass
-            
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={"error": str(e), "screenshot": screenshot_b64}
-            )
+            print(f"Error: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
         finally:
             if browser:
                 await browser.close()
-            print("Sesión terminada.")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)

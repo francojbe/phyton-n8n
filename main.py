@@ -69,6 +69,51 @@ async def scrape_data(request: ScrapeRequest):
             
             scraped_data = []
 
+            # Lógica para SuiteCRM 8 Demo
+            if "suite8demo.suiteondemand.com" in str(request.target_url):
+                print("Procesando Login en SuiteCRM 8...")
+                # Esperar a que los campos estén disponibles o que ya estemos logueados
+                try:
+                    await page.wait_for_selector("input[placeholder='Username']", timeout=10000)
+                    await page.fill("input[placeholder='Username']", request.username)
+                    await page.fill("input[placeholder='Password']", request.password)
+                    await page.click("button#login-button")
+                except PlaywrightTimeoutError:
+                    print("No se encontró el formulario de login, verificando si ya estamos dentro...")
+
+                # Esperar a la navegación al dashboard (URL exacta: #/home)
+                print("Esperando dashboard...")
+                await page.wait_for_url("**/home", timeout=30000)
+                await page.wait_for_selector(".top-nav", timeout=15000) # Navbar superior
+                
+                # Ir directamente a la lista de contactos
+                print("Navegando a Contactos...")
+                await page.goto("https://suite8demo.suiteondemand.com/#/contacts", wait_until="networkidle")
+                
+                # Esperar a que cargue la lista (las filas tienen clase tr.cdk-row o .list-view-row)
+                await page.wait_for_selector("tr.cdk-row", timeout=15000)
+                
+                # Extraer datos de los contactos
+                rows = await page.query_selector_all("tr.cdk-row")
+                for row in rows:
+                    name_el = await row.query_selector("td.cdk-column-name")
+                    email_el = await row.query_selector("td.cdk-column-email1 a.clickable")
+                    phone_el = await row.query_selector("td.cdk-column-phone_work a[href^='tel:']")
+                    
+                    scraped_data.append({
+                        "name": await name_el.inner_text() if name_el else "N/A",
+                        "email": await email_el.inner_text() if email_el else "N/A",
+                        "phone": await phone_el.inner_text() if phone_el else "N/A"
+                    })
+                
+                return {
+                    "status": "success",
+                    "message": f"Extracted {len(scraped_data)} contacts from SuiteCRM 8",
+                    "url": page.url,
+                    "record_count": len(scraped_data),
+                    "data": scraped_data
+                }
+
             # Lógica específica para el CRM de Prueba (The Internet)
             if "the-internet.herokuapp.com/login" in str(request.target_url):
                 print("Procesando Login...")
@@ -113,7 +158,19 @@ async def scrape_data(request: ScrapeRequest):
 
         except Exception as e:
             print(f"Error: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
+            # Capturar screenshot para debug
+            screenshot_b64 = ""
+            try:
+                screenshot_bytes = await page.screenshot(type="jpeg", quality=50)
+                screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+            except:
+                pass
+            
+            return {
+                "status": "error",
+                "detail": str(e),
+                "screenshot": screenshot_b64
+            }
         finally:
             if browser:
                 await browser.close()
